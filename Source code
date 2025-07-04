@@ -1,0 +1,114 @@
+import os
+import sys
+import socket
+import struct
+import platform
+
+#========================+=+ Admin Check +=+=======================
+
+def is_windows_admin():
+    """Check if the user has admin rights on Windows."""
+    try:
+        import ctypes
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except:
+        return False
+
+def relaunch_as_admin():
+    """Relaunch the script with admin rights on Windows."""
+    import ctypes
+    ctypes.windll.shell32.ShellExecuteW(
+        None, "runas", sys.executable, " ".join(sys.argv), None, 1)
+    sys.exit()
+
+def check_privileges():
+    """Ensure the script is running with elevated privileges."""
+    system = platform.system()
+    
+    if system == "Windows":
+        if not is_windows_admin():
+            print("Elevating to Administrator...")
+            relaunch_as_admin()
+    elif system in ["Linux", "Darwin"]:  # Darwin = macOS
+        if os.geteuid() != 0:
+            print("Please run this script as root (e.g., with sudo).")
+            sys.exit(1)
+    else:
+        print(f"Unsupported OS: {system}")
+        sys.exit(1)
+
+# ///////////////////////Sniffer Code///////////////////////////////
+
+def get_mac(addr_bytes):
+    """Convert MAC address bytes to readable format."""
+    return ':'.join(format(b, '02x') for b in addr_bytes)
+
+def parse_ethernet_frame(data):
+    """Unpack Ethernet frame."""
+    dest_mac, src_mac, proto = struct.unpack("!6s6sH", data[:14])
+    return get_mac(dest_mac), get_mac(src_mac), socket.htons(proto), data[14:]
+
+def parse_ipv4_packet(data):
+    """Unpack IPv4 packet."""
+    version_header_len = data[0]
+    header_len = (version_header_len & 15) * 4
+    ttl, proto, src, target = struct.unpack("!8xBB2x4s4s", data[:20])
+    return {
+        "version": version_header_len >> 4,
+        "header_length": header_len,
+        "ttl": ttl,
+        "protocol": proto,
+        "source": socket.inet_ntoa(src),
+        "destination": socket.inet_ntoa(target),
+        "data": data[header_len:]
+    }
+
+def start_sniffer():
+    """Start capturing packets."""
+    system = platform.system()
+
+    # Create appropriate raw socket
+    if system == "Windows":
+        conn = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_IP)
+        hostname = socket.gethostname()
+        conn.bind((socket.gethostbyname(hostname), 0))
+        conn.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+        conn.ioctl(socket.SIO_RCVALL, socket.RCVALL_ON)
+    elif system in ["Linux", "Darwin"]:
+        conn = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(3))
+    else:
+        print("Raw sockets are not supported on this OS.")
+        sys.exit(1)
+
+    print("Sniffer started. Press Ctrl+C to stop.\n")
+
+    try:
+        while True:
+            raw_data, _ = conn.recvfrom(65536)
+            dest_mac, src_mac, eth_proto, payload = parse_ethernet_frame(raw_data)
+
+            print(f"\nEthernet Frame:")
+            print(f"  Source MAC:      {src_mac}")
+            print(f"  Destination MAC: {dest_mac}")
+            print(f"  Protocol:        {eth_proto}")
+
+            # Check for IPv4
+            if eth_proto == 8:
+                ipv4 = parse_ipv4_packet(payload)
+                print(f"IPv4 Packet:")
+                print(f"  Source IP:       {ipv4['source']}")
+                print(f"  Destination IP:  {ipv4['destination']}")
+                print(f"  Protocol:        {ipv4['protocol']}")
+                print(f"  TTL:             {ipv4['ttl']}")
+
+    except KeyboardInterrupt:
+        print("\nSniffer stopped.")
+        if platform.system() == "Windows":
+            conn.ioctl(socket.SIO_RCVALL, socket.RCVALL_OFF)
+        conn.close()
+
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>> Entry Point >>>>>>>>>>>>>>>>>>>>>>>>>>>> 
+
+if __name__ == "__main__":
+    check_privileges()
+    start_sniffer()
